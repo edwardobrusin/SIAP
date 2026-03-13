@@ -31,8 +31,6 @@ class ScraperSIAP:
             
         options = webdriver.ChromeOptions()
         
-        # --- CORRECCIÓN PARA LINUX/CHROMIUM ---
-        # Intentamos forzar el uso de Chromium si estamos en Linux
         if os.path.exists("/usr/bin/chromium"):
             options.binary_location = "/usr/bin/chromium"
         elif os.path.exists("/usr/bin/chromium-browser"):
@@ -48,7 +46,6 @@ class ScraperSIAP:
         options.add_experimental_option("prefs", prefs)
         options.page_load_strategy = 'normal'
         
-        # Argumentos necesarios para entornos de servidor (Docker/Streamlit Cloud)
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
@@ -56,20 +53,25 @@ class ScraperSIAP:
         if headless:
             options.add_argument("--headless")
         
-        # --- INSTALACIÓN DEL DRIVER ESPECÍFICO PARA CHROMIUM ---
         try:
-            # Intentamos instalar el driver especificando que es CHROMIUM
-            service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-        except:
-            # Fallback: Intentamos instalación estándar si lo anterior falla
+            self.driver = webdriver.Chrome(options=options)
+        except Exception as e:
+            from webdriver_manager.chrome import ChromeDriverManager
+            from selenium.webdriver.chrome.service import Service
             service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
             
-        self.driver = webdriver.Chrome(service=service, options=options)
         self.wait = WebDriverWait(self.driver, 20)
-    def esperar_desbloqueo_ui(self):
+
+    def esperar_desbloqueo_ui(self, timeout=30):
+        """Espera ampliada a 30s. El servidor del SIAP puede ser muy lento en consultas pesadas."""
         try:
-            WebDriverWait(self.driver, 5).until(EC.invisibility_of_element_located((By.CLASS_NAME, "blockOverlay")))
-        except TimeoutException: pass
+            WebDriverWait(self.driver, timeout).until(
+                EC.invisibility_of_element_located((By.CLASS_NAME, "blockOverlay"))
+            )
+            time.sleep(0.2) # Breve respiro para que el JS adjunte los eventos al DOM
+        except TimeoutException: 
+            pass
 
     def click_robusto(self, elemento):
         try:
@@ -78,16 +80,17 @@ class ScraperSIAP:
         except ElementClickInterceptedException:
             self.driver.execute_script("arguments[0].click();", elemento)
 
-    def esperar_elemento(self, locator_type, locator_value, condicion="clickable"):
+    def esperar_elemento(self, locator_type, locator_value, condicion="clickable", timeout=20):
         try:
             self.esperar_desbloqueo_ui()
-            if condicion == "clickable": return self.wait.until(EC.element_to_be_clickable((locator_type, locator_value)))
-            elif condicion == "visible": return self.wait.until(EC.visibility_of_element_located((locator_type, locator_value)))
+            wait = WebDriverWait(self.driver, timeout)
+            if condicion == "clickable": return wait.until(EC.element_to_be_clickable((locator_type, locator_value)))
+            elif condicion == "visible": return wait.until(EC.visibility_of_element_located((locator_type, locator_value)))
         except TimeoutException: return None
 
     def iniciar_navegador(self):
         self.driver.get(self.base_url)
-        btn_cultivo = self.esperar_elemento(By.ID, "tipo-cult", condicion="clickable")
+        btn_cultivo = self.esperar_elemento(By.ID, "tipo-cult", condicion="clickable", timeout=30)
         if btn_cultivo:
             self.click_robusto(btn_cultivo)
             if not self.esperar_elemento(By.ID, "anioagric", condicion="visible"):
@@ -104,10 +107,11 @@ class ScraperSIAP:
             options_text = [o.get_attribute("value") for o in select.options]
             if str(value) not in options_text: return False
             select.select_by_value(str(value))
-            time.sleep(0.5) 
+            time.sleep(0.3) # Reducido de 0.5 a 0.3 para agilizar, pero suficiente para React/Angular
             return True
         except Exception: return False
 
+    # (Conserva tu método procesar_archivo_final exactamente igual aquí)
     def procesar_archivo_final(self, ruta_archivo, meta_info):
         try:
             with open(ruta_archivo, 'rb') as f: content = f.read()
@@ -179,9 +183,9 @@ class ScraperSIAP:
         btn_consultar = self.esperar_elemento(By.ID, "Consultar", condicion="clickable")
         if btn_consultar:
             self.click_robusto(btn_consultar)
-            self.esperar_desbloqueo_ui() 
-            time.sleep(2) 
-        else: return None
+            self.esperar_desbloqueo_ui(timeout=40) # Aquí la página suele tardar mucho
+        else: 
+            return None # Retorna None (Fallo técnico), NO DataFrame vacío
 
         # 2. Limpiar
         files = glob.glob(os.path.join(self.download_dir, "*"))
@@ -189,16 +193,20 @@ class ScraperSIAP:
             try: os.remove(f)
             except: pass
 
-        # 3. Generar
+        # 3. Generar Excel
         btn_generar = self.esperar_elemento(By.ID, "Excel", condicion="clickable")
         if not btn_generar: return None
         self.click_robusto(btn_generar)
 
         # 4. Descargar
-        tiempo_max = 30; start = time.time(); archivo_descargado = None
+        tiempo_max = 40 # Aumentado a 40 segs para evitar Timeouts falsos
+        start = time.time(); archivo_descargado = None
         while time.time() - start < tiempo_max:
             archivos = [f for f in glob.glob(os.path.join(self.download_dir, "*")) if not f.endswith('.crdownload') and not f.endswith('.tmp')]
-            if archivos: archivo_descargado = max(archivos, key=os.path.getctime); break
+            if archivos: 
+                archivo_descargado = max(archivos, key=os.path.getctime)
+                time.sleep(0.5) # Asegurar que el buffer del SO terminó de escribir el archivo
+                break
             time.sleep(1)
             
         if not archivo_descargado: return None
@@ -207,7 +215,7 @@ class ScraperSIAP:
         df_result = self.procesar_archivo_final(archivo_descargado, meta_info)
         try: os.remove(archivo_descargado)
         except: pass
-        return df_result
+        return df_result # Puede retornar pd.DataFrame() si está vacío, lo cual es correcto ("Sin datos reales")
 
     def cerrar(self):
         try: self.driver.quit()
@@ -268,44 +276,54 @@ st.title("🚜 Extractor SIAP: Avance de Siembras y Cosechas")
 
 # --- BARRA LATERAL (CONFIGURACIÓN) ---
 with st.sidebar:
-    st.header("1. Definir Periodo")
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        fecha_inicio = st.text_input("Inicio (MM-YYYY)", value="01-2024")
-    with col_d2:
-        fecha_fin = st.text_input("Fin (MM-YYYY)", value="03-2024")
+    # 1. Creamos el formulario. Todo lo que esté dentro no recargará la app hasta el click.
+    with st.form("configuracion_scraper"):
+        st.header("1. Definir Periodo")
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            fecha_inicio = st.text_input("Inicio (MM-YYYY)", value="01-2024")
+        with col_d2:
+            fecha_fin = st.text_input("Fin (MM-YYYY)", value="03-2024")
 
-    st.header("2. Seleccionar Entidades")
-    tipo_seleccion = st.radio(
-        "Modo de selección:",
-        ["Todo", "Estados sin Nacional", "Nacional", "Específico"],
-        index=2
-    )
+        st.header("2. Seleccionar Entidades")
+        tipo_seleccion = st.radio(
+            "Modo de selección:",
+            ["Todo", "Estados sin Nacional", "Nacional", "Específico"],
+            index=2
+        )
 
-    ids_estados_seleccionados = []
-    
-    if tipo_seleccion == "Todo":
-        ids_estados_seleccionados = list(ESTADOS_DICT.keys())
-    elif tipo_seleccion == "Estados sin Nacional":
-        ids_estados_seleccionados = [k for k in ESTADOS_DICT.keys() if k != 0]
-    elif tipo_seleccion == "Nacional":
-        ids_estados_seleccionados = [0]
-    else: # Específico
+        # Dejamos el selector siempre visible por las reglas del st.form
         nombres_seleccionados = st.multiselect(
-            "Selecciona los estados:",
+            "📍 Si elegiste 'Específico', selecciona aquí:",
             list(ESTADOS_DICT.values()),
             default=["Aguascalientes"]
         )
-        # Mapeo inverso Nombre -> ID
-        ids_estados_seleccionados = [k for k, v in ESTADOS_DICT.items() if v in nombres_seleccionados]
 
-    st.divider()
-    headless_mode = st.checkbox("Modo Silencioso (Ocultar navegador)", value=False)
-    btn_start = st.button("🚀 Iniciar Extracción", type="primary", use_container_width=True)
+        st.divider()
+        headless_mode = st.checkbox("Modo Silencioso (Ocultar navegador)", value=False)
+        
+        # NUEVO: Botón para el autoguardado
+        resume_checkpoint = st.checkbox("💾 Retomar extracción pendiente", value=True, help="Si el proceso se interrumpió, continuará desde donde se quedó.")
+
+        # 2. Reemplazamos st.button por st.form_submit_button
+        btn_start = st.form_submit_button("🚀 Iniciar Extracción", type="primary", use_container_width=True)
+
+# --- PROCESAMIENTO DE LAS OPCIONES DEL FORMULARIO ---
+# Esto se ejecuta de forma segura fuera de la barra lateral
+ids_estados_seleccionados = []
+
+if tipo_seleccion == "Todo":
+    ids_estados_seleccionados = list(ESTADOS_DICT.keys())
+elif tipo_seleccion == "Estados sin Nacional":
+    ids_estados_seleccionados = [k for k in ESTADOS_DICT.keys() if k != 0]
+elif tipo_seleccion == "Nacional":
+    ids_estados_seleccionados = [0]
+else: # Específico
+    # Mapeo inverso Nombre -> ID
+    ids_estados_seleccionados = [k for k, v in ESTADOS_DICT.items() if v in nombres_seleccionados]
 
 # --- LÓGICA DE EJECUCIÓN ---
 if btn_start:
-    # 1. Validar Fechas
     lista_fechas, error_msg = generar_rango_fechas(fecha_inicio, fecha_fin)
     
     if error_msg:
@@ -313,96 +331,170 @@ if btn_start:
     elif not ids_estados_seleccionados:
         st.error("❌ Debes seleccionar al menos una entidad.")
     else:
-        # 2. Preparar Interfaz
-        st.info("Iniciando motor de extracción... Por favor no cierres esta pestaña.")
+        st.info("Iniciando motor de extracción robusto... Por favor no cierres esta pestaña.")
         
-        # --- CÁLCULO TOTAL DE PASOS ---
-        # Total = (Número de Meses-Año) * (Número de Estados)
         total_steps = len(lista_fechas) * len(ids_estados_seleccionados)
         current_step = 0
-        
-        # BARRA DE PROGRESO (Con porcentaje visible)
-        # Inicializamos en 0% con texto
         progress_bar = st.progress(0, text="Esperando inicio... 0%")
-        
-        # CONTENEDOR DE LOGS
         log_container = st.container()
         
         all_data_frames = []
         bot = None
         
+        # === CONFIGURACIÓN DE SEGURIDAD ===
+        MAX_CONSULTAS_SESION = 60 # Cada 60 descargas reiniciamos el navegador
+        MAX_REINTENTOS = 3        # Intentos por cada estado/mes si la web falla
+        consultas_realizadas = 0
+        
+        # NUEVO: Rutas de los archivos de autoguardado
+        CHECKPOINT_CSV = "SIAP_Data_Checkpoint.csv"
+        CHECKPOINT_LOG = "SIAP_Log_Checkpoint.txt"
+        procesados_set = set()
+
+        # NUEVO: Lógica de recuperación
+        if resume_checkpoint:
+            if os.path.exists(CHECKPOINT_CSV):
+                try:
+                    df_cp = pd.read_csv(CHECKPOINT_CSV)
+                    all_data_frames.append(df_cp)
+                    log_container.success(f"📂 Checkpoint cargado: {len(df_cp)} registros previos recuperados.")
+                except Exception as e:
+                    log_container.warning("⚠️ No se pudo leer el CSV previo. Iniciando recolección de cero.")
+            
+            if os.path.exists(CHECKPOINT_LOG):
+                with open(CHECKPOINT_LOG, "r") as f:
+                    procesados_set = set(f.read().splitlines())
+                log_container.info(f"✅ Se detectaron {len(procesados_set)} consultas ya finalizadas. Serán omitidas.")
+        else:
+            # Si el usuario desmarca la casilla, borramos el historial para empezar limpio
+            if os.path.exists(CHECKPOINT_CSV): os.remove(CHECKPOINT_CSV)
+            if os.path.exists(CHECKPOINT_LOG): os.remove(CHECKPOINT_LOG)
+
+        # Función auxiliar para inicializar/reiniciar el estado del bot
+        def configurar_filtros_base(scraper_bot):
+            scraper_bot.seleccionar_opcion("cicloProd", "4") # Año Agrícola
+            scraper_bot.seleccionar_opcion("modalidad", "3") # Riego + Temporal
+
         try:
             bot = ScraperSIAP(headless=headless_mode)
             bot.iniciar_navegador()
+            configurar_filtros_base(bot)
             
-            # Filtros Fijos
-            bot.seleccionar_opcion("cicloProd", "4") # Año Agrícola
-            bot.seleccionar_opcion("modalidad", "3") # Riego + Temporal
-            
-            # Agrupar fechas por Año para el Log Resumido (pero el progreso sigue siendo individual)
             fechas_por_anio = {}
             for f in lista_fechas:
                 yr = f[0]
                 if yr not in fechas_por_anio: fechas_por_anio[yr] = []
                 fechas_por_anio[yr].append(f)
             
-            # --- BUCLE AÑOS ---
             for anio, paquete_fechas in fechas_por_anio.items():
-                
-                # Intentar cambiar al año
                 if not bot.seleccionar_opcion("anioagric", anio):
                     log_container.warning(f"⚠️ Año {anio} no disponible.")
-                    # Si falla el año, saltamos todos sus pasos en la barra de progreso
-                    pasos_saltados = len(paquete_fechas) * len(ids_estados_seleccionados)
-                    current_step += pasos_saltados
-                    pct = min(current_step / total_steps, 1.0)
-                    progress_bar.progress(pct, text=f"Progreso: {int(pct*100)}%")
+                    current_step += len(paquete_fechas) * len(ids_estados_seleccionados)
+                    progress_bar.progress(min(current_step / total_steps, 1.0))
                     continue
                 
                 filas_acumuladas_anio = 0
                 
-                # --- BUCLE MESES ---
                 for (_, mes_num, mes_nombre) in paquete_fechas:
-                    
                     if not bot.seleccionar_opcion("mesagric", mes_num):
                         log_container.error(f"❌ {anio} | {mes_nombre}: Error seleccionando mes.")
-                        # Saltamos los estados de este mes en la barra
                         current_step += len(ids_estados_seleccionados)
-                        pct = min(current_step / total_steps, 1.0)
-                        progress_bar.progress(pct, text=f"Progreso: {int(pct*100)}%")
+                        progress_bar.progress(min(current_step / total_steps, 1.0))
                         continue
                         
-                    # --- BUCLE ESTADOS (Aquí actualizamos la barra paso a paso) ---
                     for ent_id in ids_estados_seleccionados:
                         nombre_estado = ESTADOS_DICT[ent_id]
                         
-                        # Filtros
-                        bot.seleccionar_opcion("entidad", ent_id)
-                        bot.seleccionar_opcion("cultivo", "0") 
+                        # ==========================================================
+                        # NUEVO: 0. CHECKPOINT SKIP (Si ya lo procesamos, lo saltamos)
+                        # ==========================================================
+                        clave_actual = f"{anio}_{mes_nombre}_{nombre_estado}" # Ej: 2024_Enero_Aguascalientes
                         
+                        if clave_actual in procesados_set:
+                            log_container.info(f"⏭️ Omitiendo {anio} - {mes_nombre} ({nombre_estado}) ya estaba procesado.")
+                            current_step += 1
+                            pct = min(current_step / total_steps, 1.0)
+                            progress_bar.progress(pct, text=f"Progreso: {int(pct*100)}% - {mes_nombre} {anio} ({nombre_estado})")
+                            continue # Brinca al siguiente estado sin abrir el navegador
+                            
+                        # --- 1. LÓGICA DE RELAUNCH (PREVENCIÓN CATASTRÓFICA DE MEMORIA) ---
+                        if consultas_realizadas >= MAX_CONSULTAS_SESION:
+                            aviso_reinicio = log_container.empty() 
+                            aviso_reinicio.info("🔄 Mantenimiento preventivo: Reiniciando navegador...")
+                            
+                            bot.cerrar()
+                            bot = ScraperSIAP(headless=headless_mode)
+                            bot.iniciar_navegador()
+                            
+                            configurar_filtros_base(bot)
+                            bot.seleccionar_opcion("anioagric", anio)
+                            bot.seleccionar_opcion("mesagric", mes_num)
+                            consultas_realizadas = 0
+                            
+                            aviso_reinicio.success("✅ Navegador reiniciado y corriendo con memoria limpia.")
+                            time.sleep(2)
+                            aviso_reinicio.empty()
+                            
+                        # --- 2. LÓGICA DE REINTENTOS ---
                         meta = {
                             'year': anio, 'month': mes_nombre,
                             'state_name': nombre_estado,
                             'ciclo_name': "Año Agrícola", 'modalidad_name': "Riego + Temporal"
                         }
                         
-                        # Extracción
-                        df_chunk = bot.descargar_y_procesar(meta)
+                        df_chunk = None
+                        exito_extraccion = False
                         
-                        if df_chunk is not None and not df_chunk.empty:
-                            all_data_frames.append(df_chunk)
-                            filas_acumuladas_anio += len(df_chunk)
-                        else:
-                            log_container.warning(f"⚠️ {anio} - {mes_nombre} - {nombre_estado}: Sin datos.")
+                        for intento in range(1, MAX_REINTENTOS + 1):
+                            bot.seleccionar_opcion("entidad", ent_id)
+                            bot.seleccionar_opcion("cultivo", "0") 
+                            
+                            df_chunk = bot.descargar_y_procesar(meta)
+                            
+                            if df_chunk is not None: 
+                                exito_extraccion = True
+                                break 
+                            else:
+                                if intento < MAX_REINTENTOS:
+                                    log_container.warning(f"⚠️ Fallo temporal en {nombre_estado} ({mes_nombre}). Reintentando {intento}/{MAX_REINTENTOS}...")
+                                    bot.driver.refresh()
+                                    bot.esperar_desbloqueo_ui()
+                                    configurar_filtros_base(bot)
+                                    bot.seleccionar_opcion("anioagric", anio)
+                                    bot.seleccionar_opcion("mesagric", mes_num)
                         
-                        # === ACTUALIZACIÓN DE BARRA DE PROGRESO ===
+                        # ==========================================================
+                        # NUEVO: 3. EVALUAR RESULTADO Y GUARDAR CHECKPOINT
+                        # ==========================================================
+                        if exito_extraccion:
+                            # 3.1 Guardar los datos en el CSV si hubo resultados
+                            if not df_chunk.empty:
+                                all_data_frames.append(df_chunk)
+                                filas_acumuladas_anio += len(df_chunk)
+                                
+                                try:
+                                    pd.concat(all_data_frames, ignore_index=True).to_csv(CHECKPOINT_CSV, index=False, encoding='utf-8-sig')
+                                except Exception as e:
+                                    log_container.error(f"Error escribiendo el CSV de Checkpoint: {e}")
+                            
+                            # 3.2 Anotar en el "diario" (Log) que ya pasamos por aquí para no repetirlo
+                            try:
+                                with open(CHECKPOINT_LOG, "a") as f:
+                                    f.write(clave_actual + "\n")
+                                procesados_set.add(clave_actual)
+                            except Exception as e:
+                                log_container.error(f"Error escribiendo el Log de Checkpoint: {e}")
+                                
+                        elif not exito_extraccion:
+                            log_container.error(f"❌ Omitido {anio}-{mes_nombre}-{nombre_estado} tras {MAX_REINTENTOS} fallos técnicos.")
+                        
+                        consultas_realizadas += 1
+                        
+                        # Actualización de barra
                         current_step += 1
                         pct = min(current_step / total_steps, 1.0)
-                        # El texto muestra el porcentaje y qué está haciendo
-                        texto_progreso = f"Progreso: {int(pct*100)}% - Procesando {mes_nombre} {anio} ({nombre_estado})"
-                        progress_bar.progress(pct, text=texto_progreso)
+                        progress_bar.progress(pct, text=f"Progreso: {int(pct*100)}% - {mes_nombre} {anio} ({nombre_estado})")
                 
-                # --- FIN DEL AÑO ---
                 if filas_acumuladas_anio > 0:
                     log_container.success(f"✅ {anio}: Completado ({filas_acumuladas_anio} registros).")
                 else:
@@ -411,16 +503,15 @@ if btn_start:
             # --- FINALIZACIÓN ---
             if all_data_frames:
                 final_df = pd.concat(all_data_frames, ignore_index=True)
-                
-                # Forzar barra al 100% al final por si hubo redondeos
+
+                # NUEVO: Limpiar checkpoints porque ya terminamos al 100%
+                if os.path.exists(CHECKPOINT_CSV): os.remove(CHECKPOINT_CSV)
+                if os.path.exists(CHECKPOINT_LOG): os.remove(CHECKPOINT_LOG)
+
                 progress_bar.progress(1.0, text="¡Completado! 100%")
-                
                 st.balloons()
                 st.success(f"🎉 ¡Extracción Exitosa! Total: {len(final_df)} registros.")
-                
-                st.subheader("Vista Previa")
                 st.dataframe(final_df.head(10))
-                
                 csv = final_df.to_csv(index=False).encode('utf-8-sig')
                 st.download_button(
                     label="💾 Descargar CSV Consolidado",
@@ -431,10 +522,9 @@ if btn_start:
                 )
             else:
                 progress_bar.progress(1.0, text="Finalizado (Sin datos)")
-                st.warning("No se encontraron datos en el rango seleccionado.")
+                st.warning("No se encontraron datos en el rango seleccionado tras procesar todo.")
                 
         except Exception as e:
             st.error(f"❌ Error Crítico: {e}")
         finally:
-
             if bot: bot.cerrar()
