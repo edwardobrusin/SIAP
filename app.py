@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import time
 import gc
+import platform
 import glob
 import io
 import re
@@ -50,17 +51,25 @@ class ScraperSIAP:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
+        options.add_argument("--disable-features=NetworkService") # Estabiliza conexión
         
-        if headless:
+        # Forzar headless en Linux (Streamlit Cloud no tiene pantalla gráfica)
+        if platform.system() == "Linux" or headless:
             options.add_argument("--headless")
         
         try:
-            self.driver = webdriver.Chrome(options=options)
+            if platform.system() == "Linux":
+                # Usar el driver nativo instalado por packages.txt en el servidor
+                service = Service("/usr/bin/chromedriver")
+                self.driver = webdriver.Chrome(service=service, options=options)
+            else:
+                # Usar webdriver-manager solo en tu PC local (Windows/Mac)
+                from webdriver_manager.chrome import ChromeDriverManager
+                service = Service(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=options)
         except Exception as e:
-            from webdriver_manager.chrome import ChromeDriverManager
-            from selenium.webdriver.chrome.service import Service
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=options)
+            print(f"Error crítico iniciando ChromeDriver: {e}")
+            raise e
             
         self.wait = WebDriverWait(self.driver, 20)
 
@@ -343,7 +352,7 @@ if btn_start:
         
         total_steps = len(lista_fechas) * len(ids_estados_seleccionados)
         current_step = 0
-        progress_bar = st.progress(0, text="Esperando inicio... 0%")
+        progress_bar = st.progress(0, text="Esperando inicio... 0.00%")
         log_container = st.container()
         
         all_data_frames = []
@@ -434,7 +443,7 @@ if btn_start:
                             
                             current_step += 1
                             pct = min(current_step / total_steps, 1.0)
-                            progress_bar.progress(pct, text=f"Progreso: {int(pct*100)}% - Saltando ya procesados...")
+                            progress_bar.progress(pct, text=f"Progreso: {pct*100:.2f}% - Saltando ya procesados...")
                             continue # Brinca al siguiente estado sin abrir el navegador
                             
                         # --- 1. LÓGICA DE RELAUNCH (PREVENCIÓN CATASTRÓFICA DE MEMORIA) ---
@@ -517,7 +526,7 @@ if btn_start:
                         # Actualización de barra
                         current_step += 1
                         pct = min(current_step / total_steps, 1.0)
-                        progress_bar.progress(pct, text=f"Progreso: {int(pct*100)}% - {mes_nombre} {anio} ({nombre_estado})")
+                        progress_bar.progress(pct, text=f"Progreso: {pct*100:.2f}% - {mes_nombre} {anio} ({nombre_estado})")
                 
                 if filas_acumuladas_anio > 0:
                     log_container.success(f"✅ {anio}: Completado ({filas_acumuladas_anio} registros).")
