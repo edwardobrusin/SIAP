@@ -378,9 +378,15 @@ if btn_start:
         if resume_checkpoint:
             if os.path.exists(CHECKPOINT_CSV):
                 try:
-                    df_cp = pd.read_csv(CHECKPOINT_CSV)
-                    all_data_frames.append(df_cp)
-                    log_container.success(f"📂 Checkpoint cargado: {len(df_cp)} registros previos recuperados.")
+                    # Leemos solo la primera columna para no gastar RAM
+                    df_cp = pd.read_csv(CHECKPOINT_CSV, usecols=[0])
+                    registros_previos = len(df_cp)
+                    
+                    # Destruimos la variable para liberar memoria al instante
+                    del df_cp
+                    gc.collect()
+                    
+                    log_container.success(f"📂 Checkpoint detectado: El archivo ya contiene {registros_previos} registros seguros en disco.")
                 except Exception as e:
                     log_container.warning("⚠️ No se pudo leer el CSV previo. Iniciando recolección de cero.")
             
