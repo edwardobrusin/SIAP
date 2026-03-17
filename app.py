@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import time
+import gc
 import glob
 import io
 import re
@@ -218,8 +219,15 @@ class ScraperSIAP:
         return df_result # Puede retornar pd.DataFrame() si está vacío, lo cual es correcto ("Sin datos reales")
 
     def cerrar(self):
-        try: self.driver.quit()
-        except: pass
+        try: 
+            self.driver.quit()
+        except: 
+            pass
+        finally:
+            # Forzar cierre en Linux/Mac para evitar procesos zombie en el servidor
+            os.system("pkill -f chromium")
+            os.system("pkill -f chrome")
+            os.system("pkill -f chromedriver")
 
 # ==========================================
 # 2. HELPERS (UTILIDADES DE FECHAS/ESTADOS)
@@ -350,6 +358,12 @@ if btn_start:
         CHECKPOINT_CSV = "SIAP_Data_Checkpoint.csv"
         CHECKPOINT_LOG = "SIAP_Log_Checkpoint.txt"
         procesados_set = set()
+        
+        # Variables para el mensaje resumido de saltos
+        msg_omitidos = log_container.empty()
+        primer_omitido = None
+        ultimo_omitido = None
+        conteo_omitidos = 0
 
         # NUEVO: Lógica de recuperación
         if resume_checkpoint:
@@ -411,10 +425,16 @@ if btn_start:
                         clave_actual = f"{anio}_{mes_nombre}_{nombre_estado}" # Ej: 2024_Enero_Aguascalientes
                         
                         if clave_actual in procesados_set:
-                            log_container.info(f"⏭️ Omitiendo {anio} - {mes_nombre} ({nombre_estado}) ya estaba procesado.")
+                            conteo_omitidos += 1
+                            if not primer_omitido: primer_omitido = f"{mes_nombre} {anio}"
+                            ultimo_omitido = f"{mes_nombre} {anio}"
+                            
+                            # Actualiza un solo mensaje en pantalla en lugar de imprimir cientos
+                            msg_omitidos.info(f"⏭️ Omitiendo {conteo_omitidos} registros procesados (Desde {primer_omitido} hasta {ultimo_omitido})...")
+                            
                             current_step += 1
                             pct = min(current_step / total_steps, 1.0)
-                            progress_bar.progress(pct, text=f"Progreso: {int(pct*100)}% - {mes_nombre} {anio} ({nombre_estado})")
+                            progress_bar.progress(pct, text=f"Progreso: {int(pct*100)}% - Saltando ya procesados...")
                             continue # Brinca al siguiente estado sin abrir el navegador
                             
                         # --- 1. LÓGICA DE RELAUNCH (PREVENCIÓN CATASTRÓFICA DE MEMORIA) ---
@@ -467,13 +487,17 @@ if btn_start:
                         # NUEVO: 3. EVALUAR RESULTADO Y GUARDAR CHECKPOINT
                         # ==========================================================
                         if exito_extraccion:
-                            # 3.1 Guardar los datos en el CSV si hubo resultados
+                            # 3.1 Guardar los datos en el CSV directo (sin acumular en RAM)
                             if not df_chunk.empty:
-                                all_data_frames.append(df_chunk)
                                 filas_acumuladas_anio += len(df_chunk)
                                 
                                 try:
-                                    pd.concat(all_data_frames, ignore_index=True).to_csv(CHECKPOINT_CSV, index=False, encoding='utf-8-sig')
+                                    es_nuevo = not os.path.exists(CHECKPOINT_CSV)
+                                    df_chunk.to_csv(CHECKPOINT_CSV, mode='a', header=es_nuevo, index=False, encoding='utf-8-sig')
+                                    
+                                    # Forzar limpieza de memoria RAM
+                                    del df_chunk
+                                    gc.collect()
                                 except Exception as e:
                                     log_container.error(f"Error escribiendo el CSV de Checkpoint: {e}")
                             
@@ -501,17 +525,18 @@ if btn_start:
                     log_container.info(f"ℹ️ {anio}: Finalizado sin registros.")
 
             # --- FINALIZACIÓN ---
-            if all_data_frames:
-                final_df = pd.concat(all_data_frames, ignore_index=True)
+            if os.path.exists(CHECKPOINT_CSV):
+                # Leer todo el archivo consolidado solo al final para mostrarlo y descargarlo
+                final_df = pd.read_csv(CHECKPOINT_CSV)
 
-                # NUEVO: Limpiar checkpoints porque ya terminamos al 100%
-                if os.path.exists(CHECKPOINT_CSV): os.remove(CHECKPOINT_CSV)
+                # Limpiamos el Log de tracking
                 if os.path.exists(CHECKPOINT_LOG): os.remove(CHECKPOINT_LOG)
 
                 progress_bar.progress(1.0, text="¡Completado! 100%")
                 st.balloons()
                 st.success(f"🎉 ¡Extracción Exitosa! Total: {len(final_df)} registros.")
                 st.dataframe(final_df.head(10))
+                
                 csv = final_df.to_csv(index=False).encode('utf-8-sig')
                 st.download_button(
                     label="💾 Descargar CSV Consolidado",
@@ -520,6 +545,9 @@ if btn_start:
                     mime="text/csv",
                     type="primary"
                 )
+                
+                # Opcional: Si quieres borrar el checkpoint original después de terminar
+                # os.remove(CHECKPOINT_CSV) 
             else:
                 progress_bar.progress(1.0, text="Finalizado (Sin datos)")
                 st.warning("No se encontraron datos en el rango seleccionado tras procesar todo.")
