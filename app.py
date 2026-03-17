@@ -349,13 +349,29 @@ else: # Específico
     ids_estados_seleccionados = [k for k, v in ESTADOS_DICT.items() if v in nombres_seleccionados]
 
 # --- LÓGICA DE EJECUCIÓN ---
+
+# =====================================================================
+# NUEVO: Inicializar la máquina de estados
+# =====================================================================
+if 'extrayendo' not in st.session_state:
+    st.session_state.extrayendo = False
+# =====================================================================
+
 if btn_start:
+    # NUEVO: Cuando se presiona el botón, activamos el motor
+    st.session_state.extrayendo = True 
+    
+# NUEVO: Cambiamos el condicional principal
+# En lugar de "if btn_start:", ahora dependemos del session_state
+if st.session_state.extrayendo:
     lista_fechas, error_msg = generar_rango_fechas(fecha_inicio, fecha_fin)
     
     if error_msg:
         st.error(f"❌ Error en fechas: {error_msg}")
+        st.session_state.extrayendo = False # Apagamos si hay error
     elif not ids_estados_seleccionados:
         st.error("❌ Debes seleccionar al menos una entidad.")
+        st.session_state.extrayendo = False # Apagamos si hay error
     else:
         st.info("Iniciando motor de extracción robusto... Por favor no cierres esta pestaña.")
         
@@ -368,7 +384,7 @@ if btn_start:
         bot = None
         
         # === CONFIGURACIÓN DE SEGURIDAD ===
-        MAX_CONSULTAS_SESION = 30 # Cada 60 descargas reiniciamos el navegador
+        MAX_CONSULTAS_SESION = 33 # Cada 60 descargas reiniciamos el navegador
         MAX_REINTENTOS = 3        # Intentos por cada estado/mes si la web falla
         consultas_realizadas = 0
         
@@ -464,25 +480,7 @@ if btn_start:
                             
                             continue # Brinca al siguiente estado
                             
-                        # --- 1. LÓGICA DE RELAUNCH (PREVENCIÓN CATASTRÓFICA DE MEMORIA) ---
-                        if consultas_realizadas >= MAX_CONSULTAS_SESION:
-                            aviso_reinicio = log_container.empty() 
-                            aviso_reinicio.info("🔄 Mantenimiento preventivo: Reiniciando navegador...")
-                            
-                            bot.cerrar()
-                            bot = ScraperSIAP(headless=headless_mode)
-                            bot.iniciar_navegador()
-                            
-                            configurar_filtros_base(bot)
-                            bot.seleccionar_opcion("anioagric", anio)
-                            bot.seleccionar_opcion("mesagric", mes_num)
-                            consultas_realizadas = 0
-                            
-                            aviso_reinicio.success("✅ Navegador reiniciado y corriendo con memoria limpia.")
-                            time.sleep(2)
-                            aviso_reinicio.empty()
-                            
-                        # --- 2. LÓGICA DE REINTENTOS ---
+                        # --- 1. LÓGICA DE REINTENTOS ---
                         meta = {
                             'year': anio, 'month': mes_nombre,
                             'state_name': nombre_estado,
@@ -540,9 +538,22 @@ if btn_start:
                             log_container.error(f"❌ Omitido {anio}-{mes_nombre}-{nombre_estado} tras {MAX_REINTENTOS} fallos técnicos.")
                         
                         consultas_realizadas += 1
-                        
-                        # Actualización de barra
                         current_step += 1
+
+                        # ==========================================================
+                        # NUEVO: Lógica de limpieza profunda de Streamlit
+                        # ==========================================================
+                        if consultas_realizadas >= MAX_CONSULTAS_SESION:
+                            bot.cerrar() # Cerramos Chrome
+        
+                            st.success("Lote completado. Vaciando memoria RAM y recargando UI automáticamente...")
+                            time.sleep(2)
+                            
+                            # Esto recarga la página. Como st.session_state.extrayendo sigue
+                            # siendo True, el bloque principal volverá a ejecutarse solo.
+                            st.rerun()
+
+                        # Actualización de barra visual (Solo si no reiniciamos)
                         pct = min(current_step / total_steps, 1.0)
                         progress_bar.progress(pct, text=f"Progreso: {pct*100:.2f}% - {mes_nombre} {anio} ({nombre_estado})")
                 
@@ -560,6 +571,12 @@ if btn_start:
                 if os.path.exists(CHECKPOINT_LOG): os.remove(CHECKPOINT_LOG)
 
                 progress_bar.progress(1.0, text="¡Completado! 100%")
+                
+                # ==========================================================
+                # NUEVO: Apagamos el motor al terminar todo el proceso
+                # ==========================================================
+                st.session_state.extrayendo = False
+                
                 st.balloons()
                 st.success(f"🎉 ¡Extracción Exitosa! Total: {len(final_df)} registros.")
                 st.dataframe(final_df.head(10))
@@ -578,8 +595,10 @@ if btn_start:
             else:
                 progress_bar.progress(1.0, text="Finalizado (Sin datos)")
                 st.warning("No se encontraron datos en el rango seleccionado tras procesar todo.")
+                st.session_state.extrayendo = False # Apagar
                 
         except Exception as e:
             st.error(f"❌ Error Crítico: {e}")
+            st.session_state.extrayendo = False # Apagar en caso de error
         finally:
             if bot: bot.cerrar()
