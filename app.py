@@ -46,24 +46,28 @@ class ScraperSIAP:
             "profile.default_content_settings.popups": 0
         }
         options.add_experimental_option("prefs", prefs)
-        options.page_load_strategy = 'normal'
+        
+        # CAMBIO CLAVE 1: No esperar a que carguen trackers u hojas de estilo lentas
+        options.page_load_strategy = 'eager' 
         
         options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-dev-shm-usage") # Usa /tmp en vez de RAM
         options.add_argument("--disable-gpu")
-        options.add_argument("--disable-features=NetworkService") # Estabiliza conexión
+        options.add_argument("--disable-features=NetworkService")
         
-        # Forzar headless en Linux (Streamlit Cloud no tiene pantalla gráfica)
+        # CAMBIOS CLAVE 2: Estabilización Headless y Memoria
+        options.add_argument("--window-size=1920,1080") # Evita que los menús colapsen
+        options.add_argument("--disable-extensions")
+        options.add_argument("--blink-settings=imagesEnabled=false") # No carga imágenes (Ahorra RAM)
+        
         if platform.system() == "Linux" or headless:
             options.add_argument("--headless")
         
         try:
             if platform.system() == "Linux":
-                # Usar el driver nativo instalado por packages.txt en el servidor
                 service = Service("/usr/bin/chromedriver")
                 self.driver = webdriver.Chrome(service=service, options=options)
             else:
-                # Usar webdriver-manager solo en tu PC local (Windows/Mac)
                 from webdriver_manager.chrome import ChromeDriverManager
                 service = Service(ChromeDriverManager().install())
                 self.driver = webdriver.Chrome(service=service, options=options)
@@ -71,6 +75,8 @@ class ScraperSIAP:
             print(f"Error crítico iniciando ChromeDriver: {e}")
             raise e
             
+        # CAMBIO CLAVE 3: Timeout duro para evitar cuelgues infinitos en la red
+        self.driver.set_page_load_timeout(60) 
         self.wait = WebDriverWait(self.driver, 20)
 
     def esperar_desbloqueo_ui(self, timeout=30):
@@ -186,6 +192,9 @@ class ScraperSIAP:
                         'Produccion': numeros[3] if len(numeros) > 3 else 0.0,
                         'Rendimiento': numeros[4] if len(numeros) > 4 else 0.0
                     })
+        
+        # CAMBIO CLAVE 4: Destruir el árbol DOM para liberar RAM
+        soup.decompose()
         return pd.DataFrame(datos_totales)
 
     def descargar_y_procesar(self, meta_info):
@@ -359,7 +368,7 @@ if btn_start:
         bot = None
         
         # === CONFIGURACIÓN DE SEGURIDAD ===
-        MAX_CONSULTAS_SESION = 60 # Cada 60 descargas reiniciamos el navegador
+        MAX_CONSULTAS_SESION = 30 # Cada 60 descargas reiniciamos el navegador
         MAX_REINTENTOS = 3        # Intentos por cada estado/mes si la web falla
         consultas_realizadas = 0
         
@@ -437,20 +446,23 @@ if btn_start:
                         # ==========================================================
                         # NUEVO: 0. CHECKPOINT SKIP (Si ya lo procesamos, lo saltamos)
                         # ==========================================================
-                        clave_actual = f"{anio}_{mes_nombre}_{nombre_estado}" # Ej: 2024_Enero_Aguascalientes
+                        clave_actual = f"{anio}_{mes_nombre}_{nombre_estado}"
                         
                         if clave_actual in procesados_set:
                             conteo_omitidos += 1
                             if not primer_omitido: primer_omitido = f"{mes_nombre} {anio}"
                             ultimo_omitido = f"{mes_nombre} {anio}"
-                            
-                            # Actualiza un solo mensaje en pantalla en lugar de imprimir cientos
-                            msg_omitidos.info(f"⏭️ Omitiendo {conteo_omitidos} registros procesados (Desde {primer_omitido} hasta {ultimo_omitido})...")
-                            
                             current_step += 1
-                            pct = min(current_step / total_steps, 1.0)
-                            progress_bar.progress(pct, text=f"Progreso: {pct*100:.2f}% - Saltando ya procesados...")
-                            continue # Brinca al siguiente estado sin abrir el navegador
+                            
+                            # CAMBIO CLAVE 6: Estrangulamiento de la UI. 
+                            # Solo actualizamos la barra de progreso en Streamlit cada 20 saltos.
+                            # Esto evita que la app colapse por exceso de mensajes WebSocket.
+                            if conteo_omitidos % 20 == 0 or current_step == total_steps:
+                                msg_omitidos.info(f"⏭️ Omitiendo {conteo_omitidos} registros procesados (Desde {primer_omitido} hasta {ultimo_omitido})...")
+                                pct = min(current_step / total_steps, 1.0)
+                                progress_bar.progress(pct, text=f"Progreso: {pct*100:.2f}% - Saltando ya procesados...")
+                            
+                            continue # Brinca al siguiente estado
                             
                         # --- 1. LÓGICA DE RELAUNCH (PREVENCIÓN CATASTRÓFICA DE MEMORIA) ---
                         if consultas_realizadas >= MAX_CONSULTAS_SESION:
