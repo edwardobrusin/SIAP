@@ -441,6 +441,24 @@ if st.session_state.extrayendo:
                 fechas_por_anio[yr].append(f)
             
             for anio, paquete_fechas in fechas_por_anio.items():
+                # ==========================================================
+                # NUEVO: SMART SKIP (AÑO COMPLETO)
+                # Previene clics inútiles en el navegador
+                # ==========================================================
+                anio_completado = all(
+                    f"{anio}_{mes_nombre}_{ESTADOS_DICT[ent_id]}" in procesados_set
+                    for _, _, mes_nombre in paquete_fechas
+                    for ent_id in ids_estados_seleccionados
+                )
+                
+                if anio_completado:
+                    saltos = len(paquete_fechas) * len(ids_estados_seleccionados)
+                    conteo_omitidos += saltos
+                    current_step += saltos
+                    msg_omitidos.info(f"⏭️ Omitiendo AÑO completo: {anio} (ya procesado)...")
+                    progress_bar.progress(min(current_step / total_steps, 1.0), text=f"Progreso: Saltando año {anio}...")
+                    continue # Brinca al siguiente año sin tocar Selenium
+
                 if not bot.seleccionar_opcion("anioagric", anio):
                     log_container.warning(f"⚠️ Año {anio} no disponible.")
                     current_step += len(paquete_fechas) * len(ids_estados_seleccionados)
@@ -450,6 +468,22 @@ if st.session_state.extrayendo:
                 filas_acumuladas_anio = 0
                 
                 for (_, mes_num, mes_nombre) in paquete_fechas:
+                    # ==========================================================
+                    # NUEVO: SMART SKIP (MES COMPLETO)
+                    # ==========================================================
+                    mes_completado = all(
+                        f"{anio}_{mes_nombre}_{ESTADOS_DICT[ent_id]}" in procesados_set
+                        for ent_id in ids_estados_seleccionados
+                    )
+                    
+                    if mes_completado:
+                        saltos = len(ids_estados_seleccionados)
+                        conteo_omitidos += saltos
+                        current_step += saltos
+                        msg_omitidos.info(f"⏭️ Omitiendo MES completo: {mes_nombre} {anio}...")
+                        progress_bar.progress(min(current_step / total_steps, 1.0), text=f"Progreso: Saltando {mes_nombre} {anio}...")
+                        continue # Brinca al siguiente mes sin tocar Selenium
+
                     if not bot.seleccionar_opcion("mesagric", mes_num):
                         log_container.error(f"❌ {anio} | {mes_nombre}: Error seleccionando mes.")
                         current_step += len(ids_estados_seleccionados)
