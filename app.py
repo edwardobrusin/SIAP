@@ -546,7 +546,7 @@ if st.session_state.extrayendo:
                         # NUEVO: 3. EVALUAR RESULTADO Y GUARDAR CHECKPOINT
                         # ==========================================================
                         if exito_extraccion:
-                            # 3.1 Guardar los datos en el CSV directo (sin acumular en RAM)
+                            # 3.1 Guardar los datos en el CSV directo (SOLO si hay datos)
                             if not df_chunk.empty:
                                 filas_acumuladas_anio += len(df_chunk)
                                 
@@ -560,7 +560,9 @@ if st.session_state.extrayendo:
                                 except Exception as e:
                                     log_container.error(f"Error escribiendo el CSV de Checkpoint: {e}")
                             
-                            # 3.2 Anotar en el "diario" (Log) que ya pasamos por aquí para no repetirlo
+                            # 3.2 Anotar en el "diario" (Log) que ya pasamos por aquí.
+                            # IMPORTANTE: Esto debe estar FUERA del "if not df_chunk.empty"
+                            # Si extrajimos con éxito (incluso un archivo vacío), lo marcamos como completado.
                             try:
                                 with open(CHECKPOINT_LOG, "a") as f:
                                     f.write(clave_actual + "\n")
