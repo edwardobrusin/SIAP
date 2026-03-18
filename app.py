@@ -351,27 +351,43 @@ else: # Específico
 # --- LÓGICA DE EJECUCIÓN ---
 
 # =====================================================================
-# NUEVO: Inicializar la máquina de estados
+# INICIALIZAR LA MÁQUINA DE ESTADOS
 # =====================================================================
 if 'extrayendo' not in st.session_state:
     st.session_state.extrayendo = False
-# =====================================================================
 
 if btn_start:
-    # NUEVO: Cuando se presiona el botón, activamos el motor
     st.session_state.extrayendo = True 
     
-# NUEVO: Cambiamos el condicional principal
-# En lugar de "if btn_start:", ahora dependemos del session_state
+    # 1. GUARDAMOS UNA FOTO DE LA CONFIGURACIÓN (Desvinculamos de la UI)
+    st.session_state.scraper_config = {
+        'fecha_inicio': fecha_inicio,
+        'fecha_fin': fecha_fin,
+        'ids_estados': ids_estados_seleccionados,
+        'headless': headless_mode
+    }
+    
+    # 2. BORRAMOS EL HISTORIAL SOLO AQUÍ (Una única vez cuando el usuario da clic en Iniciar)
+    # Aquí es donde movimos el "else" que te daba problemas. Solo se ejecuta al dar clic.
+    if not resume_checkpoint:
+        if os.path.exists("SIAP_Data_Checkpoint.csv"): os.remove("SIAP_Data_Checkpoint.csv")
+        if os.path.exists("SIAP_Log_Checkpoint.txt"): os.remove("SIAP_Log_Checkpoint.txt")
+
+# Evaluamos la variable de sesión, no el botón
 if st.session_state.extrayendo:
-    lista_fechas, error_msg = generar_rango_fechas(fecha_inicio, fecha_fin)
+    # 3. RECUPERAMOS LOS DATOS DESDE LA SESIÓN
+    config = st.session_state.scraper_config
+    lista_fechas, error_msg = generar_rango_fechas(config['fecha_inicio'], config['fecha_fin'])
+    
+    # Reasignamos a la misma variable que usa tu bucle más abajo para no romper nada
+    ids_estados_seleccionados = config['ids_estados'] 
     
     if error_msg:
         st.error(f"❌ Error en fechas: {error_msg}")
-        st.session_state.extrayendo = False # Apagamos si hay error
+        st.session_state.extrayendo = False 
     elif not ids_estados_seleccionados:
         st.error("❌ Debes seleccionar al menos una entidad.")
-        st.session_state.extrayendo = False # Apagamos si hay error
+        st.session_state.extrayendo = False 
     else:
         st.info("Iniciando motor de extracción robusto... Por favor no cierres esta pestaña.")
         
@@ -380,49 +396,39 @@ if st.session_state.extrayendo:
         progress_bar = st.progress(0, text="Esperando inicio... 0.00%")
         log_container = st.container()
         
-        all_data_frames = []
         bot = None
         
         # === CONFIGURACIÓN DE SEGURIDAD ===
-        MAX_CONSULTAS_SESION = 33 # Cada 60 descargas reiniciamos el navegador
-        MAX_REINTENTOS = 3        # Intentos por cada estado/mes si la web falla
+        # Bajar esto a 15 es clave para que el servidor de la nube no mate la app por falta de RAM
+        MAX_CONSULTAS_SESION = 34
+        MAX_REINTENTOS = 3        
         consultas_realizadas = 0
         
-        # NUEVO: Rutas de los archivos de autoguardado
         CHECKPOINT_CSV = "SIAP_Data_Checkpoint.csv"
         CHECKPOINT_LOG = "SIAP_Log_Checkpoint.txt"
         procesados_set = set()
         
-        # Variables para el mensaje resumido de saltos
         msg_omitidos = log_container.empty()
         primer_omitido = None
         ultimo_omitido = None
         conteo_omitidos = 0
 
-        # NUEVO: Lógica de recuperación
-        if resume_checkpoint:
-            if os.path.exists(CHECKPOINT_CSV):
-                try:
-                    # Leemos solo la primera columna para no gastar RAM
-                    df_cp = pd.read_csv(CHECKPOINT_CSV, usecols=[0])
-                    registros_previos = len(df_cp)
-                    
-                    # Destruimos la variable para liberar memoria al instante
-                    del df_cp
-                    gc.collect()
-                    
-                    log_container.success(f"📂 Checkpoint detectado: El archivo ya contiene {registros_previos} registros seguros en disco.")
-                except Exception as e:
-                    log_container.warning("⚠️ No se pudo leer el CSV previo. Iniciando recolección de cero.")
-            
-            if os.path.exists(CHECKPOINT_LOG):
-                with open(CHECKPOINT_LOG, "r") as f:
-                    procesados_set = set(f.read().splitlines())
-                log_container.info(f"✅ Se detectaron {len(procesados_set)} consultas ya finalizadas. Serán omitidas.")
-        else:
-            # Si el usuario desmarca la casilla, borramos el historial para empezar limpio
-            if os.path.exists(CHECKPOINT_CSV): os.remove(CHECKPOINT_CSV)
-            if os.path.exists(CHECKPOINT_LOG): os.remove(CHECKPOINT_LOG)
+        # 4. LÓGICA DE RECUPERACIÓN (SIEMPRE ACTIVA SI EL MOTOR ESTÁ ENCENDIDO)
+        if os.path.exists(CHECKPOINT_CSV):
+            try:
+                # Leemos solo la primera columna para no gastar RAM
+                df_cp = pd.read_csv(CHECKPOINT_CSV, usecols=[0])
+                registros_previos = len(df_cp)
+                del df_cp
+                gc.collect()
+                log_container.success(f"📂 Checkpoint detectado: {registros_previos} registros seguros en disco.")
+            except Exception as e:
+                pass # Silenciamos el error si el archivo está corrupto o vacío
+        
+        if os.path.exists(CHECKPOINT_LOG):
+            with open(CHECKPOINT_LOG, "r") as f:
+                procesados_set = set(f.read().splitlines())
+            log_container.info(f"✅ Se omitirán {len(procesados_set)} consultas ya finalizadas.")
 
         # Función auxiliar para inicializar/reiniciar el estado del bot
         def configurar_filtros_base(scraper_bot):
